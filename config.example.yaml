@@ -11,21 +11,44 @@ calendar_note_name: "Today's Calendar.md"
 # calendar_note_name: "%Y-%m-%d-Calendar.md"
 
 # Calendar set name from Fantastical
-# Note: EventKit doesn't directly support Fantastical sets, so we filter by calendar names
-calendar_set: "Bridget"
+# EventKit can't read Fantastical "sets"; use "all" and filter by names below
+calendar_set: "all"
 
 # Optional: Specific calendar names to include (leave empty to include all)
-# If you know the exact calendar names in your Bridget set, list them here
+# Add exact calendar titles you want included
 calendar_filter: []
-  # - "Work"
-  # - "Personal"
+  # - "Bridget Personal"
   # - "Family"
+  # - "MS Faculty Calendar"
+
+# Optional: Map calendar titles to labels that will appear in the note
+# Example labels help AI distinguish context (e.g., "Kids", "School", "FYI")
+calendar_labels: {}
+  # "Family": "Family — Shared"
+  # "MS Grade 6 Calendar": "Kids — School"
+  # "Group Calendar - Girl Scout Troop 70724": "Kids — Activities"
+  # "Bridget Personal": "Primary"
 
 # Display options
 show_calendar_name: true   # Show which calendar each event is from
 show_location: true        # Show event location
 show_notes: false          # Show event notes/description
 
+# Calendars whose events should default to FYI (informational context)
+fyi_calendars:
+  - "Program Calendar"
+  - "Faculty Calendar"
+  - "US Holidays"
+  - "Birthdays"
+
+# If an event title contains any of these keywords (case-insensitive), tag as Optional
+optional_keywords:
+  - "optional"
+  - "drop-in"
+  - "open hours"
+  - "office hours"
+  - "info session"
+
 # Context note for AI assistants (appears at top of calendar note)
 # This helps AI understand the nature of the calendar items
-context_note: "Note: This calendar includes events from multiple family members. Some events belong to children or other family members and may not be direct commitments for the primary user."
+context_note: "Note: This calendar includes events from multiple family members. Use the (Calendar: … — …) label to determine context. Items labeled 'Kids' or 'Family' are informational and not direct commitments for the primary user."

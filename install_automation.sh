@@ -9,8 +9,31 @@ PLIST_PATH="$HOME/Library/LaunchAgents/${PLIST_NAME}.plist"
 
 echo "🤖 Installing automation for Fantastical to Obsidian..."
 
-# Get Python path
-PYTHON_PATH=$(which python3)
+# Choose Python interpreter (prefer Frameworks build if present to match granted TCC perms)
+FRAMEWORK_PY="/Library/Frameworks/Python.framework/Versions/3.13/bin/python3"
+if [ -x "$FRAMEWORK_PY" ]; then
+  PYTHON_PATH="$FRAMEWORK_PY"
+else
+  PYTHON_PATH=$(which python3)
+fi
+
+# Test the script first to ensure calendar permissions are granted
+# IMPORTANT: use the exact interpreter path that launchd will use so TCC grants the right binary
+echo "📋 Testing script and checking permissions (interpreter: ${PYTHON_PATH})..."
+if ! "${PYTHON_PATH}" "${SCRIPT_DIR}/cal_to_obsidian.py" --list-calendars > /dev/null 2>&1; then
+    echo ""
+    echo "❌ The script doesn't have calendar access yet for: ${PYTHON_PATH}"
+    echo ""
+    echo "To fix this, grant Calendar permissions to that exact Python binary:"
+    echo "1) Run: \"${PYTHON_PATH}\" \"${SCRIPT_DIR}/cal_to_obsidian.py\""
+    echo "2) When prompted, click OK to allow calendar access"
+    echo "3) System Settings → Privacy & Security → Calendars: ensure Python has access"
+    echo "4) Re-run this installer"
+    echo ""
+    exit 1
+fi
+
+echo "✅ Calendar permissions verified!"
 
 # Create LaunchAgents directory if it doesn't exist
 mkdir -p "$HOME/Library/LaunchAgents"
@@ -80,10 +103,11 @@ EOF
 # Create logs directory
 mkdir -p "${SCRIPT_DIR}/logs"
 
-# Load the launch agent
+# Load the launch agent (use modern bootstrap/kickstart for reliability)
 echo "📋 Loading launch agent..."
-launchctl unload "$PLIST_PATH" 2>/dev/null || true
-launchctl load "$PLIST_PATH"
+launchctl bootout gui/"$(id -u)" "$PLIST_PATH" 2>/dev/null || true
+launchctl bootstrap gui/"$(id -u)" "$PLIST_PATH"
+launchctl kickstart -k gui/"$(id -u)"/${PLIST_NAME}
 
 echo ""
 echo "✅ Automation installed successfully!"
@@ -95,7 +119,15 @@ echo "  - 12:00 PM"
 echo "  - 6:00 PM"
 echo ""
 echo "Logs are stored in: ${SCRIPT_DIR}/logs/"
+
 echo ""
-echo "To manually run: ./cal_to_obsidian.py"
-echo "To uninstall: launchctl unload ${PLIST_PATH}"
+echo "📝 Troubleshooting tips:"
+echo "  - If you change Python versions, re-run this installer to refresh the interpreter path"
+echo "  - Verify status: launchctl print gui/\"$(id -u)\"/${PLIST_NAME} | sed -n '1,120p'"
+
+echo ""
+echo "Commands:"
+echo "  Manual run (exact interpreter): ${PYTHON_PATH} ${SCRIPT_DIR}/cal_to_obsidian.py"
+echo "  View logs: tail -f ${SCRIPT_DIR}/logs/output.log"
+echo "  Uninstall: launchctl bootout gui/\"$(id -u)\" ${PLIST_PATH} && rm ${PLIST_PATH}"
 echo ""

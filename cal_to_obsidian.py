@@ -10,6 +10,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import yaml
 
+# Resolve the directory containing this script, regardless of current working directory
+SCRIPT_DIR = Path(__file__).resolve().parent
+
 try:
     from Foundation import NSDate, NSPredicate
     from EventKit import EKEventStore, EKEntityTypeEvent
@@ -21,7 +24,11 @@ except ImportError:
 class CalendarExporter:
     def __init__(self, config_path="config.yaml"):
         """Initialize the calendar exporter with configuration."""
-        self.config = self.load_config(config_path)
+        # Ensure config_path is absolute; if relative, resolve relative to script dir
+        cfg_path = Path(config_path)
+        if not cfg_path.is_absolute():
+            cfg_path = SCRIPT_DIR / cfg_path
+        self.config = self.load_config(str(cfg_path))
         self.store = EKEventStore.alloc().init()
         self.request_calendar_access()
 
@@ -36,7 +43,11 @@ class CalendarExporter:
             return yaml.safe_load(f)
 
     def request_calendar_access(self):
-        """Check calendar access authorization status."""
+        """Ensure calendar access is authorized; trigger the OS prompt if needed.
+
+        On macOS, simply checking authorizationStatus does not trigger the TCC prompt.
+        We must call requestAccessToEntityType:completion: once when status is NotDetermined.
+        """
         from EventKit import (
             EKAuthorizationStatusAuthorized,
             EKAuthorizationStatusDenied,
@@ -44,8 +55,12 @@ class CalendarExporter:
             EKAuthorizationStatusNotDetermined,
             EKEventStore
         )
+        from Foundation import NSRunLoop, NSDate
 
-        status = EKEventStore.authorizationStatusForEntityType_(EKEntityTypeEvent)
+        def check_status():
+            return EKEventStore.authorizationStatusForEntityType_(EKEntityTypeEvent)
+
+        status = check_status()
 
         # Map status codes to readable strings
         status_map = {
@@ -55,17 +70,34 @@ class CalendarExporter:
             EKAuthorizationStatusAuthorized: "authorized"
         }
 
+        if status == EKAuthorizationStatusNotDetermined:
+            # Trigger the permission dialog and synchronously wait for completion
+            finished = {'done': False, 'granted': False}
+
+            def _completion(granted, error):  # PyObjC bridges the block
+                finished['granted'] = bool(granted)
+                finished['done'] = True
+
+            self.store.requestAccessToEntityType_completion_(EKEntityTypeEvent, _completion)
+            # Pump the run loop until completion is called
+            while not finished['done']:
+                NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.1))
+
+            # Re-check resulting status
+            status = check_status()
+
         status_str = status_map.get(status, "unknown")
 
         if status != EKAuthorizationStatusAuthorized:
             print(f"⚠️  Calendar access is {status_str}")
-            if status == EKAuthorizationStatusNotDetermined:
-                print("Please run this script manually first to grant calendar permissions.")
-                print("When running from automation, permissions must already be granted.")
-            elif status == EKAuthorizationStatusDenied:
-                print("Calendar access denied. Check System Settings → Privacy & Security → Calendars")
+            if status == EKAuthorizationStatusDenied:
+                print("Calendar access denied. Check System Settings → Privacy & Security → Calendars.")
+            elif status == EKAuthorizationStatusRestricted:
+                print("Calendar access restricted by system policy.")
+            # Exit when not authorized - can't fetch calendars without permission
+            sys.exit(1)
 
-        return status == EKAuthorizationStatusAuthorized
+        return True
 
     def get_calendar_set_calendars(self, set_name):
         """Get all calendars in a specific calendar set."""
@@ -126,6 +158,16 @@ class CalendarExporter:
         title = event.title() or "Untitled Event"
         calendar_name = event.calendar().title()
 
+        # Determine tags (FYI/Optional) from config
+        fyi_cals = set(self.config.get('fyi_calendars', []) or [])
+        optional_keywords = [k.lower() for k in (self.config.get('optional_keywords', []) or [])]
+        tags = []
+        if calendar_name in fyi_cals:
+            tags.append('FYI')
+        lower_title = title.lower()
+        if any(k in lower_title for k in optional_keywords):
+            tags.append('Optional')
+
         # Format time
         start_date = event.startDate()
         end_date = event.endDate()
@@ -140,11 +182,18 @@ class CalendarExporter:
             time_str = f"{start_time.strftime('%I:%M %p')} - {end_time.strftime('%I:%M %p')}"
 
         # Build markdown
-        md = f"- **{time_str}** | {title}"
+        tag_prefix = ''.join(f"[{t}]" for t in tags)
+        display_title = f"{tag_prefix} {title}".strip()
+        md = f"- **{time_str}** | {display_title}"
 
-        # Add calendar name if configured
+        # Add calendar name and optional label if configured
         if self.config.get('show_calendar_name', True):
-            md += f" *({calendar_name})*"
+            labels = self.config.get('calendar_labels', {}) or {}
+            label = labels.get(calendar_name)
+            if label:
+                md += f" *(Calendar: {calendar_name} — {label})*"
+            else:
+                md += f" *(Calendar: {calendar_name})*"
 
         # Add location if available
         if event.location() and self.config.get('show_location', True):
@@ -183,14 +232,34 @@ class CalendarExporter:
             md_lines.append(f"> {context_note}")
             md_lines.append("")
 
+        # Legend if tagging is enabled
+        if (self.config.get('fyi_calendars') or self.config.get('optional_keywords')):
+            md_lines.append("Legend: [FYI] informational/not a direct commitment; [Optional] attendance not required.")
+            md_lines.append("")
+
         if not events:
             md_lines.append("No events scheduled for today.")
         else:
             md_lines.append(f"**{len(events)} event(s) scheduled:**")
             md_lines.append("")
 
+            fyi_count = 0
+            optional_count = 0
+
+            formatted = []
             for event in events:
-                md_lines.append(self.format_event_as_markdown(event))
+                line = self.format_event_as_markdown(event)
+                formatted.append(line)
+                if "[FYI]" in line:
+                    fyi_count += 1
+                if "[Optional]" in line:
+                    optional_count += 1
+
+            md_lines.extend(formatted)
+
+            # Summary block
+            md_lines.append("")
+            md_lines.append(f"Summary: {len(events)} total | {fyi_count} FYI | {optional_count} Optional")
 
         return "\n".join(md_lines)
 
@@ -292,29 +361,54 @@ Examples:
     args = parser.parse_args()
 
     # Check for config file
-    config_path = "config.yaml"
+    env_cfg = os.environ.get("CAL2_CONFIG")
+    if env_cfg:
+        config_path = env_cfg
+    else:
+        # Default to config.yaml next to this script
+        config_path = str(SCRIPT_DIR / "config.yaml")
+
     if not os.path.exists(config_path):
         print("No config.yaml found. Creating from example...")
-        if os.path.exists("config.example.yaml"):
+        example_path = str(SCRIPT_DIR / "config.example.yaml")
+        if os.path.exists(example_path):
             import shutil
-            shutil.copy("config.example.yaml", config_path)
+            shutil.copy(example_path, config_path)
             print(f"Created {config_path}. Please edit it with your settings.")
             sys.exit(0)
         else:
-            print("Error: config.example.yaml not found!")
+            print("Error: config.example.yaml not found next to script!")
+            print(f"Tried: {example_path}")
             sys.exit(1)
 
     # Handle list-calendars command
     if args.list_calendars:
         try:
-            from EventKit import EKAuthorizationStatusAuthorized, EKEventStore
+            from EventKit import (
+                EKAuthorizationStatusAuthorized,
+                EKAuthorizationStatusNotDetermined,
+                EKEventStore,
+                EKEntityTypeEvent,
+            )
+            from Foundation import NSRunLoop, NSDate
 
             store = EKEventStore.alloc().init()
             status = EKEventStore.authorizationStatusForEntityType_(EKEntityTypeEvent)
 
+            if status == EKAuthorizationStatusNotDetermined:
+                finished = {'done': False}
+
+                def _completion(granted, error):
+                    finished['done'] = True
+
+                store.requestAccessToEntityType_completion_(EKEntityTypeEvent, _completion)
+                while not finished['done']:
+                    NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.1))
+                status = EKEventStore.authorizationStatusForEntityType_(EKEntityTypeEvent)
+
             if status != EKAuthorizationStatusAuthorized:
                 print("⚠️  Calendar access not authorized")
-                print("Please run the script once to grant calendar permissions first.")
+                print("Please enable access in System Settings → Privacy & Security → Calendars and retry.")
                 sys.exit(1)
 
             calendars = store.calendarsForEntityType_(EKEntityTypeEvent)
